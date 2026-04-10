@@ -54,6 +54,19 @@ type TempWithJobsResponse = {
   }>;
 };
 
+export type EntityResolution<T> =
+  | {
+      status: "none";
+    }
+  | {
+      status: "resolved";
+      match: T;
+    }
+  | {
+      status: "ambiguous";
+      matches: T[];
+    };
+
 function createApiClient(context?: RequestContext) {
   return axios.create({
     baseURL: config.jobsApiBaseUrl,
@@ -114,6 +127,225 @@ function getTempDisplayName(
   temp: TempSummary | TempResponse | TempWithJobsResponse,
 ): string {
   return `${temp.firstName} ${temp.lastName}`.trim();
+}
+
+function normalizeText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function includesWholePhrase(messageNormalized: string, phraseNormalized: string): boolean {
+  if (!messageNormalized || !phraseNormalized) {
+    return false;
+  }
+
+  return ` ${messageNormalized} `.includes(` ${phraseNormalized} `);
+}
+
+function uniqueById<T extends { id: number }>(items: T[]): T[] {
+  const seen = new Set<number>();
+  const results: T[] = [];
+
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+
+    seen.add(item.id);
+    results.push(item);
+  }
+
+  return results;
+}
+
+function extractQuotedPhrases(message: string): string[] {
+  const matches = [...message.matchAll(/["']([^"']{2,})["']/g)];
+  return matches
+    .map((match) => normalizeText(match[1] ?? ""))
+    .filter((value) => value.length >= 2);
+}
+
+async function fetchVisibleTemps(context?: RequestContext): Promise<TempResponse[]> {
+  const api = createApiClient(context);
+  const response = await api.get<PageResponse<TempResponse>>("/temps", {
+    params: {
+      page: 0,
+      size: 100,
+    },
+  });
+
+  return response.data.items ?? [];
+}
+
+async function fetchVisibleJobs(context?: RequestContext): Promise<JobResponse[]> {
+  const api = createApiClient(context);
+  const response = await api.get<PageResponse<JobResponse>>("/jobs", {
+    params: {
+      page: 0,
+      size: 100,
+    },
+  });
+
+  return response.data.items ?? [];
+}
+
+export async function resolveVisibleTempByName(
+  message: string,
+  context?: RequestContext,
+): Promise<EntityResolution<TempResponse>> {
+  const temps = await fetchVisibleTemps(context);
+  if (!temps.length) {
+    return { status: "none" };
+  }
+
+  const messageNormalized = normalizeText(message);
+  const quotedPhrases = extractQuotedPhrases(message);
+
+  const firstNameCounts = new Map<string, number>();
+  const lastNameCounts = new Map<string, number>();
+
+  for (const temp of temps) {
+    const first = normalizeText(temp.firstName);
+    const last = normalizeText(temp.lastName);
+
+    if (first) {
+      firstNameCounts.set(first, (firstNameCounts.get(first) ?? 0) + 1);
+    }
+
+    if (last) {
+      lastNameCounts.set(last, (lastNameCounts.get(last) ?? 0) + 1);
+    }
+  }
+
+  const exactFullNameMatches: TempResponse[] = [];
+  const quotedMatches: TempResponse[] = [];
+  const uniqueTokenMatches: TempResponse[] = [];
+
+  for (const temp of temps) {
+    const fullName = normalizeText(getTempDisplayName(temp));
+    const first = normalizeText(temp.firstName);
+    const last = normalizeText(temp.lastName);
+
+    if (fullName && includesWholePhrase(messageNormalized, fullName)) {
+      exactFullNameMatches.push(temp);
+      continue;
+    }
+
+    const quotedMatch = quotedPhrases.some((phrase) => {
+      if (!phrase) {
+        return false;
+      }
+
+      return (
+        fullName.includes(phrase) ||
+        (first && first.includes(phrase)) ||
+        (last && last.includes(phrase))
+      );
+    });
+
+    if (quotedMatch) {
+      quotedMatches.push(temp);
+      continue;
+    }
+
+    const uniqueFirstNameMatch =
+      first.length >= 3 &&
+      firstNameCounts.get(first) === 1 &&
+      includesWholePhrase(messageNormalized, first);
+
+    const uniqueLastNameMatch =
+      last.length >= 3 &&
+      lastNameCounts.get(last) === 1 &&
+      includesWholePhrase(messageNormalized, last);
+
+    if (uniqueFirstNameMatch || uniqueLastNameMatch) {
+      uniqueTokenMatches.push(temp);
+    }
+  }
+
+  const exactUnique = uniqueById(exactFullNameMatches);
+  if (exactUnique.length === 1) {
+    return { status: "resolved", match: exactUnique[0] };
+  }
+  if (exactUnique.length > 1) {
+    return { status: "ambiguous", matches: exactUnique.slice(0, 4) };
+  }
+
+  const quotedUnique = uniqueById(quotedMatches);
+  if (quotedUnique.length === 1) {
+    return { status: "resolved", match: quotedUnique[0] };
+  }
+  if (quotedUnique.length > 1) {
+    return { status: "ambiguous", matches: quotedUnique.slice(0, 4) };
+  }
+
+  const tokenUnique = uniqueById(uniqueTokenMatches);
+  if (tokenUnique.length === 1) {
+    return { status: "resolved", match: tokenUnique[0] };
+  }
+  if (tokenUnique.length > 1) {
+    return { status: "ambiguous", matches: tokenUnique.slice(0, 4) };
+  }
+
+  return { status: "none" };
+}
+
+export async function resolveVisibleJobByName(
+  message: string,
+  context?: RequestContext,
+): Promise<EntityResolution<JobResponse>> {
+  const jobs = await fetchVisibleJobs(context);
+  if (!jobs.length) {
+    return { status: "none" };
+  }
+
+  const messageNormalized = normalizeText(message);
+  const quotedPhrases = extractQuotedPhrases(message);
+
+  const exactMatches: JobResponse[] = [];
+  const quotedMatches: JobResponse[] = [];
+
+  for (const job of jobs) {
+    const jobName = normalizeText(getJobDisplayName(job));
+
+    if (!jobName) {
+      continue;
+    }
+
+    if (jobName.length >= 4 && includesWholePhrase(messageNormalized, jobName)) {
+      exactMatches.push(job);
+      continue;
+    }
+
+    const quotedMatch = quotedPhrases.some(
+      (phrase) => phrase.length >= 4 && jobName.includes(phrase),
+    );
+
+    if (quotedMatch) {
+      quotedMatches.push(job);
+    }
+  }
+
+  const exactUnique = uniqueById(exactMatches);
+  if (exactUnique.length === 1) {
+    return { status: "resolved", match: exactUnique[0] };
+  }
+  if (exactUnique.length > 1) {
+    return { status: "ambiguous", matches: exactUnique.slice(0, 4) };
+  }
+
+  const quotedUnique = uniqueById(quotedMatches);
+  if (quotedUnique.length === 1) {
+    return { status: "resolved", match: quotedUnique[0] };
+  }
+  if (quotedUnique.length > 1) {
+    return { status: "ambiguous", matches: quotedUnique.slice(0, 4) };
+  }
+
+  return { status: "none" };
 }
 
 function formatJobDetails(job: JobResponse): string {
@@ -424,13 +656,13 @@ export const handleToolCall = async (
     }
 
     try {
-      const response = await api.patch<JobResponse>(`/jobs/${jobId}`, { tempId });
+      const response = await api.patch<JobResponse>(`/jobs/${jobId}`, {
+        tempId,
+      });
 
+      const job = response.data;
       return asTextResult(
-        [
-          `Assigned temp ${tempId} to job ${jobId}.`,
-          formatJobDetails(response.data),
-        ].join("\n\n"),
+        `Assigned ${job.temp ? `${getTempDisplayName(job.temp)} (Temp ${job.temp.id})` : `Temp ${tempId}`} to job ${job.id} (${getJobDisplayName(job)}).`,
       );
     } catch (error) {
       return toErrorResult(error);
@@ -450,13 +682,13 @@ export const handleToolCall = async (
     }
 
     try {
-      const response = await api.patch<JobResponse>(`/jobs/${jobId}`, { tempId: 0 });
+      const response = await api.patch<JobResponse>(`/jobs/${jobId}`, {
+        tempId: null,
+      });
 
+      const job = response.data;
       return asTextResult(
-        [
-          `Removed the assigned temp from job ${jobId}.`,
-          formatJobDetails(response.data),
-        ].join("\n\n"),
+        `Removed the assigned temp from job ${job.id} (${getJobDisplayName(job)}).`,
       );
     } catch (error) {
       return toErrorResult(error);

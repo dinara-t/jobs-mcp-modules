@@ -1,4 +1,8 @@
-import { handleToolCall } from "./toolHandlers.js";
+import {
+  handleToolCall,
+  resolveVisibleJobByName,
+  resolveVisibleTempByName,
+} from "./toolHandlers.js";
 import type {
   AssistantAction,
   ChatResult,
@@ -85,7 +89,10 @@ function asksForTempDetails(lower: string): boolean {
     lower.includes("tell me about temp") ||
     lower.includes("workload") ||
     lower.includes("that temp") ||
-    lower.includes("this temp")
+    lower.includes("this temp") ||
+    (lower.startsWith("show ") && lower.endsWith(" details")) ||
+    (lower.startsWith("tell me about ") && !lower.includes(" job")) ||
+    (lower.startsWith("show ") && !lower.includes(" job") && lower.includes(" details"))
   );
 }
 
@@ -230,6 +237,140 @@ function makeTempClarifications(): ClarificationPrompt[] {
   ];
 }
 
+function makeSpecificJobClarifications(
+  action: "details" | "available" | "best" | "unassign" | "assign",
+  jobs: Array<{ id: number; name?: string; title?: string }>,
+): ClarificationPrompt[] {
+  return jobs.slice(0, 4).map((job) => {
+    const labelBase = job.name ?? job.title ?? `Job ${job.id}`;
+
+    if (action === "available") {
+      return {
+        id: `available-job-${job.id}`,
+        label: `${labelBase} (Job ${job.id})`,
+        message: `Show available temps for job ${job.id}`,
+      };
+    }
+
+    if (action === "best") {
+      return {
+        id: `best-job-${job.id}`,
+        label: `${labelBase} (Job ${job.id})`,
+        message: `Suggest the best temp for job ${job.id}`,
+      };
+    }
+
+    if (action === "unassign") {
+      return {
+        id: `unassign-job-${job.id}`,
+        label: `${labelBase} (Job ${job.id})`,
+        message: `Unassign from job ${job.id}`,
+      };
+    }
+
+    if (action === "assign") {
+      return {
+        id: `assign-job-${job.id}`,
+        label: `${labelBase} (Job ${job.id})`,
+        message: `Assign them to job ${job.id}`,
+      };
+    }
+
+    return {
+      id: `details-job-${job.id}`,
+      label: `${labelBase} (Job ${job.id})`,
+      message: `Show job ${job.id} details`,
+    };
+  });
+}
+
+function makeSpecificTempClarifications(
+  action: "details" | "availability" | "assign",
+  temps: Array<{ id: number; firstName: string; lastName: string }>,
+  jobId?: number | null,
+): ClarificationPrompt[] {
+  return temps.slice(0, 4).map((temp) => {
+    const fullName = `${temp.firstName} ${temp.lastName}`.trim();
+
+    if (action === "availability") {
+      return {
+        id: `availability-temp-${temp.id}`,
+        label: `${fullName} (Temp ${temp.id})`,
+        message:
+          jobId != null
+            ? `Can temp ${temp.id} take job ${jobId}?`
+            : `Show temp ${temp.id} details`,
+      };
+    }
+
+    if (action === "assign") {
+      return {
+        id: `assign-temp-${temp.id}`,
+        label: `${fullName} (Temp ${temp.id})`,
+        message:
+          jobId != null ? `Assign temp ${temp.id} to job ${jobId}` : `Assign temp ${temp.id}`,
+      };
+    }
+
+    return {
+      id: `details-temp-${temp.id}`,
+      label: `${fullName} (Temp ${temp.id})`,
+      message: `Show temp ${temp.id} details`,
+    };
+  });
+}
+
+function getRequestedJobClarificationAction(lower: string) {
+  if (asksForAvailableTemps(lower)) {
+    return "available" as const;
+  }
+
+  if (asksForBestTemp(lower)) {
+    return "best" as const;
+  }
+
+  if (asksForUnassign(lower)) {
+    return "unassign" as const;
+  }
+
+  if (asksForAssign(lower)) {
+    return "assign" as const;
+  }
+
+  return "details" as const;
+}
+
+function getRequestedTempClarificationAction(lower: string) {
+  if (asksForAvailabilityExplanation(lower)) {
+    return "availability" as const;
+  }
+
+  if (asksForAssign(lower)) {
+    return "assign" as const;
+  }
+
+  return "details" as const;
+}
+
+function needsJob(lower: string): boolean {
+  return (
+    asksForAvailableTemps(lower) ||
+    asksForBestTemp(lower) ||
+    asksForJobDetails(lower) ||
+    asksForAssign(lower) ||
+    asksForUnassign(lower) ||
+    asksForAvailabilityExplanation(lower)
+  );
+}
+
+function needsTemp(lower: string): boolean {
+  return (
+    asksForTempDetails(lower) ||
+    asksForAssign(lower) ||
+    asksForAvailabilityExplanation(lower)
+  );
+}
+
 export const handleChatMessage = async (
   message?: string,
   context?: RequestContext,
@@ -238,11 +379,68 @@ export const handleChatMessage = async (
     return fail(400, "message is required.");
   }
 
-  const lower = message.trim().toLowerCase();
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
+
   const resolvedJob = resolveJobId(lower, context);
   const resolvedTemp = resolveTempId(lower, context);
-  const jobId = resolvedJob.value;
-  const tempId = resolvedTemp.value;
+
+  let jobId = resolvedJob.value;
+  let tempId = resolvedTemp.value;
+
+  if (jobId == null) {
+    const jobResolution = await resolveVisibleJobByName(trimmed, context);
+
+    if (jobResolution.status === "resolved") {
+      jobId = jobResolution.match.id;
+    } else if (jobResolution.status === "ambiguous" && needsJob(lower)) {
+      const prompts = makeSpecificJobClarifications(
+        getRequestedJobClarificationAction(lower),
+        jobResolution.matches,
+      );
+
+      return ok(
+        "I found more than one matching job name. Choose the one you meant.",
+        {
+          clarificationPrompts: prompts,
+          resolvedEntities: baseResolvedEntities(
+            null,
+            tempId,
+            resolvedJob.usedCurrentJobContext,
+            resolvedTemp.usedLastSuggestedTempContext,
+          ),
+        },
+      );
+    }
+  }
+
+  if (tempId == null) {
+    const tempResolution = await resolveVisibleTempByName(trimmed, context);
+
+    if (tempResolution.status === "resolved") {
+      tempId = tempResolution.match.id;
+    } else if (tempResolution.status === "ambiguous" && needsTemp(lower)) {
+      const prompts = makeSpecificTempClarifications(
+        getRequestedTempClarificationAction(lower),
+        tempResolution.matches,
+        jobId,
+      );
+
+      return ok(
+        "I found more than one matching temp name. Choose the person you meant.",
+        {
+          clarificationPrompts: prompts,
+          resolvedEntities: baseResolvedEntities(
+            jobId,
+            null,
+            resolvedJob.usedCurrentJobContext,
+            resolvedTemp.usedLastSuggestedTempContext,
+          ),
+        },
+      );
+    }
+  }
+
   const resolvedEntities = baseResolvedEntities(
     jobId,
     tempId,
@@ -317,7 +515,7 @@ export const handleChatMessage = async (
   if (asksForAvailabilityExplanation(lower)) {
     if (jobId == null || tempId == null) {
       return ok(
-        "I need both a temp and a job to explain availability. You can give both IDs, ask from a job page, or ask about the temp I just suggested.",
+        "I need both a temp and a job to explain availability. You can give IDs, use a job page, ask about the temp I just suggested, or mention the person and job by name.",
         {
           clarificationPrompts: [
             {
@@ -371,7 +569,7 @@ export const handleChatMessage = async (
   if (asksForBestTemp(lower)) {
     if (jobId == null) {
       return ok(
-        "I need a job to recommend the best temp. Ask from a job page or include a job ID.",
+        "I need a job to recommend the best temp. Ask from a job page, include a job ID, or mention the job name.",
         {
           clarificationPrompts: makeJobClarifications(),
           resolvedEntities,
@@ -414,7 +612,7 @@ export const handleChatMessage = async (
   if (asksForAvailableTemps(lower)) {
     if (jobId == null) {
       return ok(
-        "I need a job to show available temps. Ask from a job page or include a job ID.",
+        "I need a job to show available temps. Ask from a job page, include a job ID, or mention the job name.",
         {
           clarificationPrompts: makeJobClarifications(),
           resolvedEntities,
@@ -452,7 +650,7 @@ export const handleChatMessage = async (
   if (asksForJobDetails(lower)) {
     if (jobId == null) {
       return ok(
-        "I need a job to show details. Ask from a job page or include a job ID.",
+        "I need a job to show details. Ask from a job page, include a job ID, or mention the job name.",
         {
           clarificationPrompts: makeJobClarifications(),
           resolvedEntities,
@@ -495,7 +693,7 @@ export const handleChatMessage = async (
   if (asksForTempDetails(lower)) {
     if (tempId == null) {
       return ok(
-        "I need a temp to show details. Include a temp ID or ask about the temp I just suggested.",
+        "I need a temp to show details. Include a temp ID, ask about the temp I just suggested, or mention the person by name.",
         {
           clarificationPrompts: makeTempClarifications(),
           resolvedEntities,
@@ -533,7 +731,7 @@ export const handleChatMessage = async (
   if (asksForAssign(lower)) {
     if (jobId == null) {
       return ok(
-        "I need a job before I can assign anyone. Ask from a job page or include a job ID.",
+        "I need a job before I can assign anyone. Ask from a job page, include a job ID, or mention the job name.",
         {
           clarificationPrompts: makeJobClarifications(),
           resolvedEntities,
@@ -543,7 +741,7 @@ export const handleChatMessage = async (
 
     if (tempId == null) {
       return ok(
-        "I need a temp before I can assign anyone. Include a temp ID or say 'Assign them' after I recommend a temp.",
+        "I need a temp before I can assign anyone. Include a temp ID, say 'Assign them' after I recommend a temp, or mention the person by name.",
         {
           clarificationPrompts: [
             {
@@ -592,7 +790,7 @@ export const handleChatMessage = async (
   if (asksForUnassign(lower)) {
     if (jobId == null) {
       return ok(
-        "I need a job before I can unassign anyone. Ask from a job page or include a job ID.",
+        "I need a job before I can unassign anyone. Ask from a job page, include a job ID, or mention the job name.",
         {
           clarificationPrompts: makeJobClarifications(),
           resolvedEntities,
@@ -627,7 +825,7 @@ export const handleChatMessage = async (
   }
 
   return ok(
-    "I can help with jobs, temps, recommendations, and assignments. Choose one of these to get started.",
+    "I can help with jobs, temps, recommendations, and assignments. You can use IDs, current page context, or visible names.",
     {
       clarificationPrompts: [
         {
