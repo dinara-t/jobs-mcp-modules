@@ -5,6 +5,7 @@ import { tools } from "./tools.js";
 import { handleToolCall } from "./toolHandlers.js";
 import { handleChatMessage } from "./chat.js";
 import { config } from "./config.js";
+import type { ChatContext } from "./types.js";
 
 dotenv.config();
 
@@ -55,6 +56,7 @@ app.post("/tools/call", async (req, res) => {
 app.post("/chat", async (req, res) => {
   const body = (req.body ?? {}) as {
     message?: string;
+    context?: ChatContext;
   };
 
   const cookieHeader = req.headers.cookie;
@@ -63,6 +65,7 @@ app.post("/chat", async (req, res) => {
 
   const context = {
     cookieHeader,
+    chatContext: body.context,
   };
 
   const result = await handleChatMessage(body.message, context);
