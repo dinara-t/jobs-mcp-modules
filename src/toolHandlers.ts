@@ -67,15 +67,42 @@ export type EntityResolution<T> =
       matches: T[];
     };
 
+function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  const cookies = cookieHeader.split(";");
+
+  for (const cookie of cookies) {
+    const [key, ...rest] = cookie.trim().split("=");
+    if (key === name) {
+      return decodeURIComponent(rest.join("="));
+    }
+  }
+
+  return null;
+}
+
 function createApiClient(context?: RequestContext) {
+  const headers: Record<string, string> = {};
+
+  if (context?.cookieHeader) {
+    headers["Cookie"] = context.cookieHeader;
+  }
+
+  const csrfHeaderValue =
+    context?.csrfHeaderValue ??
+    getCookieValue(context?.cookieHeader, "XSRF-TOKEN");
+
+  if (csrfHeaderValue) {
+    headers["X-XSRF-TOKEN"] = csrfHeaderValue;
+  }
+
   return axios.create({
     baseURL: config.jobsApiBaseUrl,
     withCredentials: true,
-    headers: context?.cookieHeader
-      ? {
-          Cookie: context.cookieHeader,
-        }
-      : undefined,
+    headers,
   });
 }
 

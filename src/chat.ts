@@ -12,446 +12,176 @@ import type {
   ResolvedEntities,
 } from "./types.js";
 
-function ok(
-  reply: string,
-  options?: {
-    pendingAction?: PendingAction;
-    suggestedActions?: AssistantAction[];
-    clarificationPrompts?: ClarificationPrompt[];
-    resolvedEntities?: ResolvedEntities;
-  },
-): ChatResult {
+function textReply(text: string): ChatResult {
   return {
     status: 200,
     body: {
-      reply,
-      pendingAction: options?.pendingAction,
-      suggestedActions: options?.suggestedActions ?? [],
-      clarificationPrompts: options?.clarificationPrompts ?? [],
-      resolvedEntities: options?.resolvedEntities,
+      reply: text,
+      suggestedActions: [],
+      clarificationPrompts: [],
     },
   };
 }
 
-function fail(status: number, error: string): ChatResult {
-  return {
-    status,
-    body: { error },
-  };
+function normalizeText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function extractJobId(lower: string): number | null {
-  const match = lower.match(/\bjob\s+(\d+)\b/);
+function extractJobId(message: string): number | null {
+  const match = message.match(/\bjob\s+(\d+)\b/i);
   return match ? Number(match[1]) : null;
 }
 
-function extractTempId(lower: string): number | null {
-  const match = lower.match(/\btemp\s+(\d+)\b/);
+function extractTempId(message: string): number | null {
+  const match = message.match(/\btemp\s+(\d+)\b/i);
   return match ? Number(match[1]) : null;
 }
 
-function asksForAvailableTemps(lower: string): boolean {
+function isAssignIntent(normalized: string): boolean {
   return (
-    lower.includes("available") ||
-    lower.includes("who can take") ||
-    lower.includes("who is free") ||
-    lower.includes("show temps")
+    normalized.includes("assign") ||
+    normalized.includes("put them on") ||
+    normalized.includes("put temp") ||
+    normalized.includes("book them")
   );
 }
 
-function asksForBestTemp(lower: string): boolean {
+function isUnassignIntent(normalized: string): boolean {
   return (
-    lower.includes("best temp") ||
-    lower.includes("suggest") ||
-    lower.includes("recommended") ||
-    lower.includes("recommend")
+    normalized.includes("unassign") ||
+    normalized.includes("remove them") ||
+    normalized.includes("remove temp") ||
+    normalized.includes("clear assignment") ||
+    normalized.includes("take them off")
   );
 }
 
-function asksForJobDetails(lower: string): boolean {
+function isJobDetailsIntent(normalized: string): boolean {
   return (
-    lower.includes("job details") ||
-    lower.includes("show job") ||
-    lower.includes("tell me about job") ||
-    lower.includes("this job") ||
-    lower.includes("this one") ||
-    lower.includes("job here") ||
-    lower === "show details" ||
-    lower === "show details for this job" ||
-    lower.startsWith("job ")
+    normalized.includes("show details for this job") ||
+    normalized.includes("show job details") ||
+    normalized.includes("job details") ||
+    normalized.includes("show details for job")
   );
 }
 
-function asksForTempDetails(lower: string): boolean {
+function isTempDetailsIntent(normalized: string): boolean {
   return (
-    lower.includes("temp details") ||
-    lower.includes("show temp") ||
-    lower.includes("tell me about temp") ||
-    lower.includes("workload") ||
-    lower.includes("that temp") ||
-    lower.includes("this temp") ||
-    (lower.startsWith("show ") && lower.endsWith(" details")) ||
-    (lower.startsWith("tell me about ") && !lower.includes(" job")) ||
-    (lower.startsWith("show ") && !lower.includes(" job") && lower.includes(" details"))
+    normalized.includes("show temp") && normalized.includes("details")
   );
 }
 
-function asksForAvailabilityExplanation(lower: string): boolean {
+function isAvailableTempsIntent(normalized: string): boolean {
   return (
-    lower.includes("why is temp") ||
-    lower.includes("why temp") ||
-    lower.includes("can temp") ||
-    (lower.includes("is temp") && lower.includes("available")) ||
-    lower.includes("explain availability") ||
-    lower.includes("can they take") ||
-    lower.includes("are they available") ||
-    lower.includes("is that temp available")
+    normalized.includes("show available temps") ||
+    normalized.includes("available temps") ||
+    normalized.includes("who is available")
   );
 }
 
-function asksForAssign(lower: string): boolean {
-  return lower.includes("assign");
-}
-
-function asksForUnassign(lower: string): boolean {
-  return lower.includes("unassign") || lower.includes("remove");
-}
-
-function refersToCurrentJob(lower: string): boolean {
+function isBestTempIntent(normalized: string): boolean {
   return (
-    lower.includes("this job") ||
-    lower.includes("job here") ||
-    lower.includes("here") ||
-    lower.includes("this one")
+    normalized.includes("suggest the best temp") ||
+    normalized.includes("best temp") ||
+    normalized.includes("who should take this")
   );
 }
 
-function refersToLastSuggestedTemp(lower: string): boolean {
+function isAvailabilityExplanationIntent(normalized: string): boolean {
   return (
-    lower.includes("them") ||
-    lower.includes("that temp") ||
-    lower.includes("this temp") ||
-    lower.includes("recommended temp") ||
-    lower.includes("best temp")
+    normalized.includes("why is temp") ||
+    normalized.includes("why are they unavailable") ||
+    normalized.includes("can they take this job") ||
+    normalized.includes("why unavailable")
   );
 }
 
-function isConfirmAssign(lower: string): boolean {
-  return lower.startsWith("__confirm_assign__");
-}
-
-function isConfirmUnassign(lower: string): boolean {
-  return lower.startsWith("__confirm_unassign__");
-}
-
-function resolveJobId(lower: string, context?: RequestContext) {
-  const explicitJobId = extractJobId(lower);
-  if (explicitJobId != null) {
-    return { value: explicitJobId, usedCurrentJobContext: false };
-  }
-
-  const currentJobId = context?.chatContext?.currentJobId;
-  if (
-    typeof currentJobId === "number" &&
-    currentJobId > 0 &&
-    (refersToCurrentJob(lower) ||
-      asksForBestTemp(lower) ||
-      asksForAvailableTemps(lower) ||
-      asksForJobDetails(lower) ||
-      asksForUnassign(lower) ||
-      asksForAssign(lower) ||
-      asksForAvailabilityExplanation(lower))
-  ) {
-    return { value: currentJobId, usedCurrentJobContext: true };
-  }
-
-  return { value: null, usedCurrentJobContext: false };
-}
-
-function resolveTempId(lower: string, context?: RequestContext) {
-  const explicitTempId = extractTempId(lower);
-  if (explicitTempId != null) {
-    return { value: explicitTempId, usedLastSuggestedTempContext: false };
-  }
-
-  const lastSuggestedTempId = context?.chatContext?.lastSuggestedTempId;
-  if (
-    typeof lastSuggestedTempId === "number" &&
-    lastSuggestedTempId > 0 &&
-    (refersToLastSuggestedTemp(lower) ||
-      (asksForAssign(lower) && !lower.includes("temp ")) ||
-      (asksForAvailabilityExplanation(lower) && !lower.includes("temp ")))
-  ) {
-    return { value: lastSuggestedTempId, usedLastSuggestedTempContext: true };
-  }
-
-  return { value: null, usedLastSuggestedTempContext: false };
-}
-
-function baseResolvedEntities(
+function buildResolvedEntities(
   jobId: number | null,
   tempId: number | null,
-  usedCurrentJobContext: boolean,
-  usedLastSuggestedTempContext: boolean,
+  options?: {
+    usedCurrentJobContext?: boolean;
+    usedLastSuggestedTempContext?: boolean;
+  },
 ): ResolvedEntities {
   return {
     jobId,
     tempId,
-    usedCurrentJobContext,
-    usedLastSuggestedTempContext,
+    usedCurrentJobContext: options?.usedCurrentJobContext ?? false,
+    usedLastSuggestedTempContext: options?.usedLastSuggestedTempContext ?? false,
   };
 }
 
-function makeJobClarifications(): ClarificationPrompt[] {
-  return [
-    {
-      id: "job-details",
-      label: "Show details for this job",
-      message: "Show details for this job",
-    },
-    {
-      id: "available-temps",
-      label: "Show available temps for this job",
-      message: "Show available temps for this job",
-    },
-    {
-      id: "best-temp",
-      label: "Suggest the best temp for this job",
-      message: "Suggest the best temp for this job",
-    },
-  ];
-}
-
-function makeTempClarifications(): ClarificationPrompt[] {
-  return [
-    {
-      id: "temp-5-details",
-      label: "Show temp 5 details",
-      message: "Show temp 5 details",
-    },
-    {
-      id: "best-temp",
-      label: "Suggest the best temp for this job",
-      message: "Suggest the best temp for this job",
-    },
-  ];
-}
-
-function makeSpecificJobClarifications(
-  action: "details" | "available" | "best" | "unassign" | "assign",
-  jobs: Array<{ id: number; name?: string; title?: string }>,
+function buildClarificationPromptsForTemps(
+  matches: Array<{ id: number; firstName: string; lastName: string }>,
 ): ClarificationPrompt[] {
-  return jobs.slice(0, 4).map((job) => {
-    const labelBase = job.name ?? job.title ?? `Job ${job.id}`;
-
-    if (action === "available") {
-      return {
-        id: `available-job-${job.id}`,
-        label: `${labelBase} (Job ${job.id})`,
-        message: `Show available temps for job ${job.id}`,
-      };
-    }
-
-    if (action === "best") {
-      return {
-        id: `best-job-${job.id}`,
-        label: `${labelBase} (Job ${job.id})`,
-        message: `Suggest the best temp for job ${job.id}`,
-      };
-    }
-
-    if (action === "unassign") {
-      return {
-        id: `unassign-job-${job.id}`,
-        label: `${labelBase} (Job ${job.id})`,
-        message: `Unassign from job ${job.id}`,
-      };
-    }
-
-    if (action === "assign") {
-      return {
-        id: `assign-job-${job.id}`,
-        label: `${labelBase} (Job ${job.id})`,
-        message: `Assign them to job ${job.id}`,
-      };
-    }
-
-    return {
-      id: `details-job-${job.id}`,
-      label: `${labelBase} (Job ${job.id})`,
-      message: `Show job ${job.id} details`,
-    };
-  });
+  return matches.map((temp) => ({
+    id: `temp-${temp.id}`,
+    label: `${temp.firstName} ${temp.lastName} (Temp ${temp.id})`,
+    message: `Show temp ${temp.id} details`,
+  }));
 }
 
-function makeSpecificTempClarifications(
-  action: "details" | "availability" | "assign",
-  temps: Array<{ id: number; firstName: string; lastName: string }>,
-  jobId?: number | null,
+function buildClarificationPromptsForJobs(
+  matches: Array<{ id: number; name?: string; title?: string }>,
 ): ClarificationPrompt[] {
-  return temps.slice(0, 4).map((temp) => {
-    const fullName = `${temp.firstName} ${temp.lastName}`.trim();
-
-    if (action === "availability") {
-      return {
-        id: `availability-temp-${temp.id}`,
-        label: `${fullName} (Temp ${temp.id})`,
-        message:
-          jobId != null
-            ? `Can temp ${temp.id} take job ${jobId}?`
-            : `Show temp ${temp.id} details`,
-      };
-    }
-
-    if (action === "assign") {
-      return {
-        id: `assign-temp-${temp.id}`,
-        label: `${fullName} (Temp ${temp.id})`,
-        message:
-          jobId != null ? `Assign temp ${temp.id} to job ${jobId}` : `Assign temp ${temp.id}`,
-      };
-    }
-
-    return {
-      id: `details-temp-${temp.id}`,
-      label: `${fullName} (Temp ${temp.id})`,
-      message: `Show temp ${temp.id} details`,
-    };
-  });
+  return matches.map((job) => ({
+    id: `job-${job.id}`,
+    label: `${job.name ?? job.title ?? `Job ${job.id}`} (Job ${job.id})`,
+    message: `Show job ${job.id} details`,
+  }));
 }
 
-function getRequestedJobClarificationAction(lower: string) {
-  if (asksForAvailableTemps(lower)) {
-    return "available" as const;
-  }
-
-  if (asksForBestTemp(lower)) {
-    return "best" as const;
-  }
-
-  if (asksForUnassign(lower)) {
-    return "unassign" as const;
-  }
-
-  if (asksForAssign(lower)) {
-    return "assign" as const;
-  }
-
-  return "details" as const;
-}
-
-function getRequestedTempClarificationAction(lower: string) {
-  if (asksForAvailabilityExplanation(lower)) {
-    return "availability" as const;
-  }
-
-  if (asksForAssign(lower)) {
-    return "assign" as const;
-  }
-
-  return "details" as const;
-}
-
-function needsJob(lower: string): boolean {
-  return (
-    asksForAvailableTemps(lower) ||
-    asksForBestTemp(lower) ||
-    asksForJobDetails(lower) ||
-    asksForAssign(lower) ||
-    asksForUnassign(lower) ||
-    asksForAvailabilityExplanation(lower)
-  );
-}
-
-function needsTemp(lower: string): boolean {
-  return (
-    asksForTempDetails(lower) ||
-    asksForAssign(lower) ||
-    asksForAvailabilityExplanation(lower)
-  );
-}
-
-export const handleChatMessage = async (
-  message?: string,
-  context?: RequestContext,
-): Promise<ChatResult> => {
-  if (!message || !message.trim()) {
-    return fail(400, "message is required.");
-  }
-
-  const trimmed = message.trim();
-  const lower = trimmed.toLowerCase();
-
-  const resolvedJob = resolveJobId(lower, context);
-  const resolvedTemp = resolveTempId(lower, context);
-
-  let jobId = resolvedJob.value;
-  let tempId = resolvedTemp.value;
-
-  if (jobId == null) {
-    const jobResolution = await resolveVisibleJobByName(trimmed, context);
-
-    if (jobResolution.status === "resolved") {
-      jobId = jobResolution.match.id;
-    } else if (jobResolution.status === "ambiguous" && needsJob(lower)) {
-      const prompts = makeSpecificJobClarifications(
-        getRequestedJobClarificationAction(lower),
-        jobResolution.matches,
-      );
-
-      return ok(
-        "I found more than one matching job name. Choose the one you meant.",
-        {
-          clarificationPrompts: prompts,
-          resolvedEntities: baseResolvedEntities(
-            null,
-            tempId,
-            resolvedJob.usedCurrentJobContext,
-            resolvedTemp.usedLastSuggestedTempContext,
-          ),
-        },
-      );
-    }
-  }
-
-  if (tempId == null) {
-    const tempResolution = await resolveVisibleTempByName(trimmed, context);
-
-    if (tempResolution.status === "resolved") {
-      tempId = tempResolution.match.id;
-    } else if (tempResolution.status === "ambiguous" && needsTemp(lower)) {
-      const prompts = makeSpecificTempClarifications(
-        getRequestedTempClarificationAction(lower),
-        tempResolution.matches,
-        jobId,
-      );
-
-      return ok(
-        "I found more than one matching temp name. Choose the person you meant.",
-        {
-          clarificationPrompts: prompts,
-          resolvedEntities: baseResolvedEntities(
-            jobId,
-            null,
-            resolvedJob.usedCurrentJobContext,
-            resolvedTemp.usedLastSuggestedTempContext,
-          ),
-        },
-      );
-    }
-  }
-
-  const resolvedEntities = baseResolvedEntities(
+function buildAssignPendingAction(jobId: number, tempId: number): PendingAction {
+  return {
+    type: "assign_temp_to_job",
     jobId,
     tempId,
-    resolvedJob.usedCurrentJobContext,
-    resolvedTemp.usedLastSuggestedTempContext,
-  );
+    title: "Assign temp",
+    message: `Assign temp ${tempId} to job ${jobId}?`,
+    confirmLabel: "Confirm assign",
+  };
+}
 
-  if (isConfirmAssign(lower)) {
-    if (jobId == null || tempId == null) {
-      return fail(400, "Missing job ID or temp ID for confirm assign.");
+function buildUnassignPendingAction(jobId: number): PendingAction {
+  return {
+    type: "unassign_temp_from_job",
+    jobId,
+    title: "Unassign temp",
+    message: `Remove the current temp from job ${jobId}?`,
+    confirmLabel: "Confirm unassign",
+  };
+}
+
+function extractReplyTextFromToolResult(result: Awaited<ReturnType<typeof handleToolCall>>): string {
+  if (result.body.content?.length) {
+    const firstText = result.body.content.find((item) => item.type === "text");
+    if (firstText?.text) {
+      return firstText.text;
     }
+  }
+
+  return result.body.error ?? "No reply returned.";
+}
+
+export async function handleChatMessage(
+  message: string,
+  context?: RequestContext,
+): Promise<ChatResult> {
+  const rawMessage = message.trim();
+  const normalized = normalizeText(rawMessage);
+
+  const currentJobId = context?.chatContext?.currentJobId ?? null;
+  const lastSuggestedTempId = context?.chatContext?.lastSuggestedTempId ?? null;
+
+  const confirmAssignMatch = rawMessage.match(/^__confirm_assign__\s+temp\s+(\d+)\s+to\s+job\s+(\d+)$/i);
+  if (confirmAssignMatch) {
+    const tempId = Number(confirmAssignMatch[1]);
+    const jobId = Number(confirmAssignMatch[2]);
 
     const result = await handleToolCall(
       "assign_temp_to_job",
@@ -459,31 +189,37 @@ export const handleChatMessage = async (
       context,
     );
 
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Show job details",
-          message: "Show details for this job",
-        },
-        {
-          type: "send_message",
-          label: "Show temp details",
-          message: `Show temp ${tempId} details`,
-        },
-      ],
-      resolvedEntities,
-    });
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions:
+          result.status === 200
+            ? [
+                {
+                  type: "send_message",
+                  label: "Show job details",
+                  message: "Show details for this job",
+                },
+                {
+                  type: "send_message",
+                  label: "Show temp details",
+                  message: `Show temp ${tempId} details`,
+                },
+              ]
+            : [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(jobId, tempId, {
+          usedCurrentJobContext: currentJobId === jobId,
+          usedLastSuggestedTempContext: lastSuggestedTempId === tempId,
+        }),
+      },
+    };
   }
 
-  if (isConfirmUnassign(lower)) {
-    if (jobId == null) {
-      return fail(400, "Missing job ID for confirm unassign.");
-    }
+  const confirmUnassignMatch = rawMessage.match(/^__confirm_unassign__\s+job\s+(\d+)$/i);
+  if (confirmUnassignMatch) {
+    const jobId = Number(confirmUnassignMatch[1]);
 
     const result = await handleToolCall(
       "unassign_temp_from_job",
@@ -491,323 +227,132 @@ export const handleChatMessage = async (
       context,
     );
 
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Show job details",
-          message: "Show details for this job",
-        },
-        {
-          type: "send_message",
-          label: "Show available temps",
-          message: "Show available temps for this job",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForAvailabilityExplanation(lower)) {
-    if (jobId == null || tempId == null) {
-      return ok(
-        "I need both a temp and a job to explain availability. You can give IDs, use a job page, ask about the temp I just suggested, or mention the person and job by name.",
-        {
-          clarificationPrompts: [
-            {
-              id: "why-temp-5",
-              label: "Why is temp 5 unavailable for this job?",
-              message: "Why is temp 5 unavailable for this job?",
-            },
-            {
-              id: "can-they-take",
-              label: "Can they take this job?",
-              message: "Can they take this job?",
-            },
-          ],
-          resolvedEntities,
-        },
-      );
-    }
-
-    const result = await handleToolCall(
-      "explain_temp_availability_for_job",
-      { jobId, tempId },
-      context,
-    );
-
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Show temp details",
-          message: `Show temp ${tempId} details`,
-        },
-        {
-          type: "send_message",
-          label: "Show available temps",
-          message: "Show available temps for this job",
-        },
-        {
-          type: "send_message",
-          label: "Suggest best temp",
-          message: "Suggest the best temp for this job",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForBestTemp(lower)) {
-    if (jobId == null) {
-      return ok(
-        "I need a job to recommend the best temp. Ask from a job page, include a job ID, or mention the job name.",
-        {
-          clarificationPrompts: makeJobClarifications(),
-          resolvedEntities,
-        },
-      );
-    }
-
-    const result = await handleToolCall(
-      "suggest_best_temp_for_job",
-      { jobId },
-      context,
-    );
-
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Assign them",
-          message: "Assign them",
-        },
-        {
-          type: "send_message",
-          label: "Why are they available?",
-          message: "Can they take this job?",
-        },
-        {
-          type: "send_message",
-          label: "Show all available temps",
-          message: "Show available temps for this job",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForAvailableTemps(lower)) {
-    if (jobId == null) {
-      return ok(
-        "I need a job to show available temps. Ask from a job page, include a job ID, or mention the job name.",
-        {
-          clarificationPrompts: makeJobClarifications(),
-          resolvedEntities,
-        },
-      );
-    }
-
-    const result = await handleToolCall(
-      "get_available_temps_for_job",
-      { jobId },
-      context,
-    );
-
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Suggest best temp",
-          message: "Suggest the best temp for this job",
-        },
-        {
-          type: "send_message",
-          label: "Show job details",
-          message: "Show details for this job",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForJobDetails(lower)) {
-    if (jobId == null) {
-      return ok(
-        "I need a job to show details. Ask from a job page, include a job ID, or mention the job name.",
-        {
-          clarificationPrompts: makeJobClarifications(),
-          resolvedEntities,
-        },
-      );
-    }
-
-    const result = await handleToolCall(
-      "get_job_details",
-      { jobId },
-      context,
-    );
-
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Show available temps",
-          message: "Show available temps for this job",
-        },
-        {
-          type: "send_message",
-          label: "Suggest best temp",
-          message: "Suggest the best temp for this job",
-        },
-        {
-          type: "send_message",
-          label: "Unassign temp",
-          message: "Unassign from this job",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForTempDetails(lower)) {
-    if (tempId == null) {
-      return ok(
-        "I need a temp to show details. Include a temp ID, ask about the temp I just suggested, or mention the person by name.",
-        {
-          clarificationPrompts: makeTempClarifications(),
-          resolvedEntities,
-        },
-      );
-    }
-
-    const result = await handleToolCall(
-      "get_temp_details",
-      { tempId },
-      context,
-    );
-
-    if (result.status !== 200) {
-      return fail(result.status, result.body.error ?? "Failed.");
-    }
-
-    return ok(result.body.content?.[0]?.text ?? "No reply returned.", {
-      suggestedActions: [
-        {
-          type: "send_message",
-          label: "Can they take this job?",
-          message: "Can they take this job?",
-        },
-        {
-          type: "send_message",
-          label: "Assign them",
-          message: "Assign them",
-        },
-      ],
-      resolvedEntities,
-    });
-  }
-
-  if (asksForAssign(lower)) {
-    if (jobId == null) {
-      return ok(
-        "I need a job before I can assign anyone. Ask from a job page, include a job ID, or mention the job name.",
-        {
-          clarificationPrompts: makeJobClarifications(),
-          resolvedEntities,
-        },
-      );
-    }
-
-    if (tempId == null) {
-      return ok(
-        "I need a temp before I can assign anyone. Include a temp ID, say 'Assign them' after I recommend a temp, or mention the person by name.",
-        {
-          clarificationPrompts: [
-            {
-              id: "assign-them",
-              label: "Assign them",
-              message: "Assign them",
-            },
-            {
-              id: "best-temp",
-              label: "Suggest the best temp",
-              message: "Suggest the best temp for this job",
-            },
-          ],
-          resolvedEntities,
-        },
-      );
-    }
-
-    return ok(
-      `I can assign temp ${tempId} to job ${jobId}. Please confirm to continue.`,
-      {
-        pendingAction: {
-          type: "assign_temp_to_job",
-          jobId,
-          tempId,
-          title: "Assign temp",
-          message: `Assign temp ${tempId} to job ${jobId}?`,
-          confirmLabel: "Confirm assign",
-        },
-        suggestedActions: [
-          {
-            type: "confirm_pending_action",
-            label: "Confirm assign",
-          },
-          {
-            type: "send_message",
-            label: "Show temp details",
-            message: `Show temp ${tempId} details`,
-          },
-        ],
-        resolvedEntities,
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions:
+          result.status === 200
+            ? [
+                {
+                  type: "send_message",
+                  label: "Show job details",
+                  message: "Show details for this job",
+                },
+                {
+                  type: "send_message",
+                  label: "Show available temps",
+                  message: "Show available temps for this job",
+                },
+              ]
+            : [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(jobId, null, {
+          usedCurrentJobContext: currentJobId === jobId,
+          usedLastSuggestedTempContext: false,
+        }),
       },
-    );
+    };
   }
 
-  if (asksForUnassign(lower)) {
-    if (jobId == null) {
-      return ok(
-        "I need a job before I can unassign anyone. Ask from a job page, include a job ID, or mention the job name.",
-        {
-          clarificationPrompts: makeJobClarifications(),
-          resolvedEntities,
-        },
-      );
+  let resolvedJobId = extractJobId(rawMessage);
+  let resolvedTempId = extractTempId(rawMessage);
+
+  let usedCurrentJobContext = false;
+  let usedLastSuggestedTempContext = false;
+
+  if (resolvedJobId == null && currentJobId != null && normalized.includes("this job")) {
+    resolvedJobId = currentJobId;
+    usedCurrentJobContext = true;
+  }
+
+  if (resolvedJobId == null && currentJobId != null) {
+    const jobIntentWithoutExplicitJob =
+      isAssignIntent(normalized) ||
+      isUnassignIntent(normalized) ||
+      isJobDetailsIntent(normalized) ||
+      isAvailableTempsIntent(normalized) ||
+      isBestTempIntent(normalized) ||
+      isAvailabilityExplanationIntent(normalized);
+
+    if (jobIntentWithoutExplicitJob) {
+      resolvedJobId = currentJobId;
+      usedCurrentJobContext = true;
+    }
+  }
+
+  if (resolvedTempId == null && lastSuggestedTempId != null && /\bthem\b/i.test(rawMessage)) {
+    resolvedTempId = lastSuggestedTempId;
+    usedLastSuggestedTempContext = true;
+  }
+
+  if (resolvedTempId == null) {
+    const tempResolution = await resolveVisibleTempByName(rawMessage, context);
+
+    if (tempResolution.status === "resolved") {
+      resolvedTempId = tempResolution.match.id;
     }
 
-    return ok(
-      `I can remove the assigned temp from job ${jobId}. Please confirm to continue.`,
-      {
-        pendingAction: {
-          type: "unassign_temp_from_job",
-          jobId,
-          title: "Unassign temp",
-          message: `Remove the assigned temp from job ${jobId}?`,
-          confirmLabel: "Confirm unassign",
+    if (tempResolution.status === "ambiguous") {
+      return {
+        status: 200,
+        body: {
+          reply: "I found more than one matching temp name. Choose the person you meant.",
+          suggestedActions: [],
+          clarificationPrompts: buildClarificationPromptsForTemps(tempResolution.matches),
+          resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+            usedCurrentJobContext,
+            usedLastSuggestedTempContext,
+          }),
         },
+      };
+    }
+  }
+
+  if (resolvedJobId == null) {
+    const jobResolution = await resolveVisibleJobByName(rawMessage, context);
+
+    if (jobResolution.status === "resolved") {
+      resolvedJobId = jobResolution.match.id;
+    }
+
+    if (jobResolution.status === "ambiguous") {
+      return {
+        status: 200,
+        body: {
+          reply: "I found more than one matching job name. Choose the job you meant.",
+          suggestedActions: [],
+          clarificationPrompts: buildClarificationPromptsForJobs(jobResolution.matches),
+          resolvedEntities: buildResolvedEntities(null, resolvedTempId, {
+            usedCurrentJobContext,
+            usedLastSuggestedTempContext,
+          }),
+        },
+      };
+    }
+  }
+
+  if (isUnassignIntent(normalized)) {
+    if (resolvedJobId == null) {
+      return {
+        status: 200,
+        body: {
+          reply: "Tell me which job you want to unassign from.",
+          suggestedActions: [],
+          clarificationPrompts: [],
+          resolvedEntities: buildResolvedEntities(null, resolvedTempId, {
+            usedCurrentJobContext,
+            usedLastSuggestedTempContext,
+          }),
+        },
+      };
+    }
+
+    return {
+      status: 200,
+      body: {
+        reply: `I can remove the current temp from job ${resolvedJobId}. Please confirm to continue.`,
+        pendingAction: buildUnassignPendingAction(resolvedJobId),
         suggestedActions: [
           {
             type: "confirm_pending_action",
@@ -819,32 +364,235 @@ export const handleChatMessage = async (
             message: "Show details for this job",
           },
         ],
-        resolvedEntities,
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext: false,
+        }),
       },
-    );
+    };
   }
 
-  return ok(
-    "I can help with jobs, temps, recommendations, and assignments. You can use IDs, current page context, or visible names.",
-    {
-      clarificationPrompts: [
+  if (isAssignIntent(normalized)) {
+    if (resolvedJobId == null) {
+      return {
+        status: 200,
+        body: {
+          reply: "Tell me which job you want to assign someone to.",
+          suggestedActions: [],
+          clarificationPrompts: [],
+          resolvedEntities: buildResolvedEntities(null, resolvedTempId, {
+            usedCurrentJobContext,
+            usedLastSuggestedTempContext,
+          }),
+        },
+      };
+    }
+
+    if (resolvedTempId == null) {
+      return {
+        status: 200,
+        body: {
+          reply:
+            "I need a temp before I can assign anyone. Include a temp ID, say 'Assign them' after I recommend a temp, or mention the person by name.",
+          suggestedActions: [
+            {
+              type: "send_message",
+              label: "Show available temps",
+              message: "Show available temps for this job",
+            },
+            {
+              type: "send_message",
+              label: "Suggest best temp",
+              message: "Suggest the best temp for this job",
+            },
+          ],
+          clarificationPrompts: [],
+          resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+            usedCurrentJobContext,
+            usedLastSuggestedTempContext,
+          }),
+        },
+      };
+    }
+
+    return {
+      status: 200,
+      body: {
+        reply: `I can assign temp ${resolvedTempId} to job ${resolvedJobId}. Please confirm to continue.`,
+        pendingAction: buildAssignPendingAction(resolvedJobId, resolvedTempId),
+        suggestedActions: [
+          {
+            type: "confirm_pending_action",
+            label: "Confirm assign",
+          },
+          {
+            type: "send_message",
+            label: "Show temp details",
+            message: `Show temp ${resolvedTempId} details`,
+          },
+        ],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isJobDetailsIntent(normalized) && resolvedJobId != null) {
+    const result = await handleToolCall("get_job_details", { jobId: resolvedJobId }, context);
+
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions:
+          result.status === 200
+            ? [
+                {
+                  type: "send_message",
+                  label: "Show available temps",
+                  message: "Show available temps for this job",
+                },
+                {
+                  type: "send_message",
+                  label: "Suggest best temp",
+                  message: "Suggest the best temp for this job",
+                },
+              ]
+            : [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isTempDetailsIntent(normalized) && resolvedTempId != null) {
+    const result = await handleToolCall("get_temp_details", { tempId: resolvedTempId }, context);
+
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions: [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isAvailableTempsIntent(normalized) && resolvedJobId != null) {
+    const result = await handleToolCall(
+      "get_available_temps_for_job",
+      { jobId: resolvedJobId },
+      context,
+    );
+
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions:
+          result.status === 200
+            ? [
+                {
+                  type: "send_message",
+                  label: "Suggest best temp",
+                  message: "Suggest the best temp for this job",
+                },
+              ]
+            : [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isBestTempIntent(normalized) && resolvedJobId != null) {
+    const result = await handleToolCall(
+      "suggest_best_temp_for_job",
+      { jobId: resolvedJobId },
+      context,
+    );
+
+    const reply = extractReplyTextFromToolResult(result);
+    const suggestedTempMatch = reply.match(/\bTemp\s+(\d+)\b/i);
+    const suggestedTempId = suggestedTempMatch ? Number(suggestedTempMatch[1]) : null;
+
+    const suggestedActions: AssistantAction[] = [];
+    if (result.status === 200 && suggestedTempId != null) {
+      suggestedActions.push(
         {
-          id: "show-job-details",
-          label: "Show details for this job",
-          message: "Show details for this job",
+          type: "send_message",
+          label: "Assign them",
+          message: "Assign them",
         },
         {
-          id: "available-temps",
-          label: "Show available temps",
-          message: "Show available temps for this job",
+          type: "send_message",
+          label: "Why are they available?",
+          message: `Why is temp ${suggestedTempId} unavailable for this job?`,
         },
-        {
-          id: "best-temp",
-          label: "Suggest best temp",
-          message: "Suggest the best temp for this job",
-        },
-      ],
-      resolvedEntities,
-    },
+      );
+    }
+
+    return {
+      status: result.status,
+      body: {
+        reply,
+        suggestedActions,
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, suggestedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isAvailabilityExplanationIntent(normalized) && resolvedJobId != null && resolvedTempId != null) {
+    const result = await handleToolCall(
+      "explain_temp_availability_for_job",
+      { jobId: resolvedJobId, tempId: resolvedTempId },
+      context,
+    );
+
+    return {
+      status: result.status,
+      body: {
+        reply: extractReplyTextFromToolResult(result),
+        suggestedActions:
+          result.status === 200
+            ? [
+                {
+                  type: "send_message",
+                  label: "Assign them",
+                  message: "Assign them",
+                },
+              ]
+            : [],
+        clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  return textReply(
+    currentJobId != null
+      ? "Try asking about this job, available temps, the best temp suggestion, assigning someone, or unassigning the current temp."
+      : "Try asking for a job, a temp, available temps for a job, the best temp for a job, or assignment help.",
   );
-};
+}

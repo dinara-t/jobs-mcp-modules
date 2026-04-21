@@ -71,5 +71,6 @@ export type ChatResult = {
 
 export type RequestContext = {
   cookieHeader?: string;
+  csrfHeaderValue?: string;
   chatContext?: ChatContext;
 };
