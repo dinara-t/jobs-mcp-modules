@@ -696,31 +696,31 @@ export const handleToolCall = async (
     }
   }
 
-  if (name === "unassign_temp_from_job") {
-    const jobId = args?.jobId;
+ if (name === "unassign_temp_from_job") {
+  const jobId = args?.jobId;
 
-    if (typeof jobId !== "number") {
-      return {
-        status: 400,
-        body: {
-          error: "jobId must be a number.",
-        },
-      };
-    }
-
-    try {
-      const response = await api.patch<JobResponse>(`/jobs/${jobId}`, {
-        tempId: null,
-      });
-
-      const job = response.data;
-      return asTextResult(
-        `Removed the assigned temp from job ${job.id} (${getJobDisplayName(job)}).`,
-      );
-    } catch (error) {
-      return toErrorResult(error);
-    }
+  if (typeof jobId !== "number") {
+    return {
+      status: 400,
+      body: {
+        error: "jobId must be a number.",
+      },
+    };
   }
+
+  try {
+    const response = await api.patch<JobResponse>(`/jobs/${jobId}`, {
+      tempId: 0,
+    });
+
+    const job = response.data;
+    return asTextResult(
+      `Removed the assigned temp from job ${job.id} (${getJobDisplayName(job)}).`,
+    );
+  } catch (error) {
+    return toErrorResult(error);
+  }
+}
 
   return {
     status: 404,
