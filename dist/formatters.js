@@ -12,7 +12,7 @@ export function asTextResult(text) {
     };
 }
 export function getJobDisplayName(job) {
-    return (job.name ?? job.title ?? `Job ${job.id}`).trim();
+    return job.name.trim() || `Job ${job.id}`;
 }
 export function getTempDisplayName(temp) {
     return `${temp.firstName} ${temp.lastName}`.trim();
@@ -60,17 +60,29 @@ export function formatBestTempSuggestion(job, tempsPage) {
     }
     const best = tempsPage.items[0];
     const remaining = tempsPage.items.slice(1, 4);
+    const workload = best.jobCount ?? 0;
     const lines = [
         `Best temp suggestion for job ${job.id} (${getJobDisplayName(job)}):`,
         `${getTempDisplayName(best)} (Temp ${best.id})`,
-        `Reason: currently has the lowest visible workload with ${best.jobCount ?? 0} assigned job(s).`,
+        "",
+        "Why this is the strongest option:",
+        `- Available for the full job date range: ${job.startDate} to ${job.endDate}`,
+        `- Lowest visible workload among returned candidates: ${workload} assigned job(s)`,
+        "- No overlapping booking was returned by the availability endpoint",
+        "",
+        "Confidence: High",
+        "Reason: this recommendation is based on live availability filtering and current visible workload.",
     ];
     if (remaining.length) {
-        lines.push("Other available options:");
+        lines.push("", "Other available options:");
         for (const temp of remaining) {
             lines.push(`- Temp ${temp.id}: ${getTempDisplayName(temp)} — current jobs: ${temp.jobCount ?? 0}`);
         }
     }
+    lines.push("", "Suggested next actions:");
+    lines.push("- Assign them");
+    lines.push("- Check why they can take this job");
+    lines.push("- Show all available temps");
     return lines.join("\n");
 }
 function rangesOverlap(startA, endA, startB, endB) {
@@ -82,16 +94,70 @@ export function formatTempAvailabilityExplanation(job, temp) {
     const overlappingJobs = temp.jobs.filter((assignedJob) => rangesOverlap(assignedJob.startDate, assignedJob.endDate, job.startDate, job.endDate));
     if (!overlappingJobs.length) {
         return [
-            `${tempName} (Temp ${temp.id}) is available for job ${job.id} (${targetJobName}).`,
-            `Reason: there are no overlapping assigned jobs between ${job.startDate} and ${job.endDate}.`,
+            `${tempName} (Temp ${temp.id}) can take job ${job.id} (${targetJobName}).`,
+            "",
+            "Availability check:",
+            `- Job date range: ${job.startDate} to ${job.endDate}`,
+            "- No overlapping assigned jobs found",
+            `- Current visible workload: ${temp.jobs.length} assigned job(s)`,
+            "",
+            "Confidence: High",
+            "Reason: this is based on the temp's current assigned jobs and the target job date range.",
         ].join("\n");
     }
     const lines = [
-        `${tempName} (Temp ${temp.id}) is not available for job ${job.id} (${targetJobName}).`,
-        `Reason: the following assigned job(s) overlap with ${job.startDate} to ${job.endDate}:`,
+        `${tempName} (Temp ${temp.id}) cannot take job ${job.id} (${targetJobName}).`,
+        "",
+        "Availability issue:",
+        `- Job date range: ${job.startDate} to ${job.endDate}`,
+        "- One or more assigned jobs overlap with this date range",
+        "",
+        "Overlapping job(s):",
     ];
     for (const assignedJob of overlappingJobs) {
         lines.push(`- Job ${assignedJob.id}: ${assignedJob.name} (${assignedJob.startDate} to ${assignedJob.endDate})`);
     }
+    lines.push("", "Suggested next actions:");
+    lines.push("- Show all available temps");
+    lines.push("- Suggest the best temp for this job");
     return lines.join("\n");
+}
+export function formatAssignmentSummary(job, temp) {
+    const tempName = getTempDisplayName(temp);
+    const jobName = getJobDisplayName(job);
+    const currentJobs = "jobs" in temp ? temp.jobs.length : null;
+    const lines = [
+        `${tempName} was assigned to Job ${job.id} (${jobName}).`,
+        "",
+        "Assignment summary:",
+        `- Job date range: ${job.startDate} to ${job.endDate}`,
+        `- Assigned temp: ${tempName} (Temp ${temp.id})`,
+        "- API accepted the assignment, so no conflicting booking was detected",
+    ];
+    if (currentJobs != null) {
+        lines.push(`- Current visible workload: ${currentJobs} assigned job(s)`);
+    }
+    lines.push("", "Suggested next actions:");
+    lines.push("- Show job details");
+    lines.push("- Show temp details");
+    lines.push("- Find backup temps");
+    return lines.join("\n");
+}
+export function formatUnassignmentSummary(job, previousTemp) {
+    const jobName = getJobDisplayName(job);
+    const previousTempText = previousTemp
+        ? `${getTempDisplayName(previousTemp)} (Temp ${previousTemp.id})`
+        : "the assigned temp";
+    return [
+        `${previousTempText} was removed from Job ${job.id} (${jobName}).`,
+        "",
+        "Unassignment summary:",
+        `- Job date range: ${job.startDate} to ${job.endDate}`,
+        "- Job is now unassigned",
+        "",
+        "Suggested next actions:",
+        "- Suggest the best temp for this job",
+        "- Show all available temps",
+        "- Show job details",
+    ].join("\n");
 }

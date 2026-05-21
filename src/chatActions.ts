@@ -44,11 +44,11 @@ export function buildClarificationPromptsForTemps(
 }
 
 export function buildClarificationPromptsForJobs(
-  matches: Array<{ id: number; name?: string; title?: string }>,
+  matches: Array<{ id: number; name: string }>,
 ): ClarificationPrompt[] {
   return matches.map((job) => ({
     id: `available-job-${job.id}`,
-    label: `${job.name ?? job.title ?? `Job ${job.id}`} (Job ${job.id})`,
+    label: `${job.name.trim() || `Job ${job.id}`} (Job ${job.id})`,
     message: `Show available temps for job ${job.id}`,
   }));
 }

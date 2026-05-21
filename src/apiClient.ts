@@ -20,8 +20,7 @@ export type TempSummary = {
 
 export type JobResponse = {
   id: number;
-  name?: string;
-  title?: string;
+  name: string;
   startDate: string;
   endDate: string;
   temp?: TempSummary | null;

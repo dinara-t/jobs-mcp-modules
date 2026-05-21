@@ -26,7 +26,7 @@ export function buildClarificationPromptsForTemps(matches) {
 export function buildClarificationPromptsForJobs(matches) {
     return matches.map((job) => ({
         id: `available-job-${job.id}`,
-        label: `${job.name ?? job.title ?? `Job ${job.id}`} (Job ${job.id})`,
+        label: `${job.name.trim() || `Job ${job.id}`} (Job ${job.id})`,
         message: `Show available temps for job ${job.id}`,
     }));
 }

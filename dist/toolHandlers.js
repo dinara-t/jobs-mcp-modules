@@ -1,5 +1,5 @@
 import { createApiClient, toErrorResult } from "./apiClient.js";
-import { asTextResult, formatAvailableTemps, formatBestTempSuggestion, formatJobDetails, formatTempAvailabilityExplanation, formatTempDetails, getJobDisplayName, getTempDisplayName, } from "./formatters.js";
+import { asTextResult, formatAssignmentSummary, formatAvailableTemps, formatBestTempSuggestion, formatJobDetails, formatTempAvailabilityExplanation, formatTempDetails, formatUnassignmentSummary, getJobDisplayName, getTempDisplayName, } from "./formatters.js";
 import { extractQuotedPhrases, includesWholePhrase, normalizeText, uniqueById, } from "./chatText.js";
 async function fetchVisibleTemps(context) {
     const api = createApiClient(context);
@@ -20,6 +20,24 @@ async function fetchVisibleJobs(context) {
         },
     });
     return response.data.items ?? [];
+}
+function readNumberArg(args, fieldName) {
+    const value = args?.[fieldName];
+    if (typeof value === "number") {
+        return {
+            ok: true,
+            value,
+        };
+    }
+    return {
+        ok: false,
+        result: {
+            status: 400,
+            body: {
+                error: `${fieldName} must be a number.`,
+            },
+        },
+    };
 }
 export async function resolveVisibleTempByName(message, context) {
     const temps = await fetchVisibleTemps(context);
@@ -55,21 +73,18 @@ export async function resolveVisibleTempByName(message, context) {
             if (!phrase) {
                 return false;
             }
-            return (fullName.includes(phrase) ||
-                (first && first.includes(phrase)) ||
-                (last && last.includes(phrase)));
+            return (fullName === phrase ||
+                fullName.includes(phrase) ||
+                phrase.includes(fullName));
         });
         if (quotedMatch) {
             quotedMatches.push(temp);
             continue;
         }
-        const uniqueFirstNameMatch = first.length >= 3 &&
-            firstNameCounts.get(first) === 1 &&
-            includesWholePhrase(messageNormalized, first);
-        const uniqueLastNameMatch = last.length >= 3 &&
-            lastNameCounts.get(last) === 1 &&
-            includesWholePhrase(messageNormalized, last);
-        if (uniqueFirstNameMatch || uniqueLastNameMatch) {
+        const firstIsUnique = first && firstNameCounts.get(first) === 1;
+        const lastIsUnique = last && lastNameCounts.get(last) === 1;
+        if ((firstIsUnique && includesWholePhrase(messageNormalized, first)) ||
+            (lastIsUnique && includesWholePhrase(messageNormalized, last))) {
             uniqueTokenMatches.push(temp);
         }
     }
@@ -103,58 +118,45 @@ export async function resolveVisibleJobByName(message, context) {
     }
     const messageNormalized = normalizeText(message);
     const quotedPhrases = extractQuotedPhrases(message);
-    const exactMatches = [];
-    const quotedMatches = [];
+    const matches = [];
     for (const job of jobs) {
         const jobName = normalizeText(getJobDisplayName(job));
         if (!jobName) {
             continue;
         }
-        if (jobName.length >= 4 && includesWholePhrase(messageNormalized, jobName)) {
-            exactMatches.push(job);
+        if (includesWholePhrase(messageNormalized, jobName)) {
+            matches.push(job);
             continue;
         }
-        const quotedMatch = quotedPhrases.some((phrase) => phrase.length >= 4 && jobName.includes(phrase));
+        const quotedMatch = quotedPhrases.some((phrase) => {
+            if (!phrase) {
+                return false;
+            }
+            return (jobName === phrase ||
+                jobName.includes(phrase) ||
+                phrase.includes(jobName));
+        });
         if (quotedMatch) {
-            quotedMatches.push(job);
+            matches.push(job);
         }
     }
-    const exactUnique = uniqueById(exactMatches);
-    if (exactUnique.length === 1) {
-        return { status: "resolved", match: exactUnique[0] };
+    const uniqueMatches = uniqueById(matches);
+    if (uniqueMatches.length === 1) {
+        return { status: "resolved", match: uniqueMatches[0] };
     }
-    if (exactUnique.length > 1) {
-        return { status: "ambiguous", matches: exactUnique.slice(0, 4) };
-    }
-    const quotedUnique = uniqueById(quotedMatches);
-    if (quotedUnique.length === 1) {
-        return { status: "resolved", match: quotedUnique[0] };
-    }
-    if (quotedUnique.length > 1) {
-        return { status: "ambiguous", matches: quotedUnique.slice(0, 4) };
+    if (uniqueMatches.length > 1) {
+        return { status: "ambiguous", matches: uniqueMatches.slice(0, 4) };
     }
     return { status: "none" };
 }
 export const handleToolCall = async (name, args, context) => {
-    if (!name) {
-        return {
-            status: 400,
-            body: {
-                error: "Tool name is required.",
-            },
-        };
-    }
     const api = createApiClient(context);
     if (name === "get_job_details") {
-        const jobId = args?.jobId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
+        const jobId = jobIdArg.value;
         try {
             const response = await api.get(`/jobs/${jobId}`);
             return asTextResult(formatJobDetails(response.data));
@@ -164,15 +166,11 @@ export const handleToolCall = async (name, args, context) => {
         }
     }
     if (name === "get_temp_details") {
-        const tempId = args?.tempId;
-        if (typeof tempId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "tempId must be a number.",
-                },
-            };
+        const tempIdArg = readNumberArg(args, "tempId");
+        if (!tempIdArg.ok) {
+            return tempIdArg.result;
         }
+        const tempId = tempIdArg.value;
         try {
             const response = await api.get(`/temps/${tempId}`);
             return asTextResult(formatTempDetails(response.data));
@@ -182,23 +180,19 @@ export const handleToolCall = async (name, args, context) => {
         }
     }
     if (name === "get_available_temps_for_job") {
-        const jobId = args?.jobId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
+        const jobId = jobIdArg.value;
         try {
             const response = await api.get("/temps", {
                 params: {
                     jobId,
-                    sortBy: "jobCount",
+                    sortBy: "jobcount",
                     sortDir: "asc",
                     page: 0,
-                    size: 100,
+                    size: 10,
                 },
             });
             return asTextResult(formatAvailableTemps(jobId, response.data));
@@ -208,25 +202,21 @@ export const handleToolCall = async (name, args, context) => {
         }
     }
     if (name === "suggest_best_temp_for_job") {
-        const jobId = args?.jobId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
+        const jobId = jobIdArg.value;
         try {
             const [jobResponse, tempsResponse] = await Promise.all([
                 api.get(`/jobs/${jobId}`),
                 api.get("/temps", {
                     params: {
                         jobId,
-                        sortBy: "jobCount",
+                        sortBy: "jobcount",
                         sortDir: "asc",
                         page: 0,
-                        size: 100,
+                        size: 10,
                     },
                 }),
             ]);
@@ -237,24 +227,16 @@ export const handleToolCall = async (name, args, context) => {
         }
     }
     if (name === "explain_temp_availability_for_job") {
-        const jobId = args?.jobId;
-        const tempId = args?.tempId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
-        if (typeof tempId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "tempId must be a number.",
-                },
-            };
+        const tempIdArg = readNumberArg(args, "tempId");
+        if (!tempIdArg.ok) {
+            return tempIdArg.result;
         }
+        const jobId = jobIdArg.value;
+        const tempId = tempIdArg.value;
         try {
             const [jobResponse, tempResponse] = await Promise.all([
                 api.get(`/jobs/${jobId}`),
@@ -267,53 +249,46 @@ export const handleToolCall = async (name, args, context) => {
         }
     }
     if (name === "assign_temp_to_job") {
-        const jobId = args?.jobId;
-        const tempId = args?.tempId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
-        if (typeof tempId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "tempId must be a number.",
-                },
-            };
+        const tempIdArg = readNumberArg(args, "tempId");
+        if (!tempIdArg.ok) {
+            return tempIdArg.result;
         }
+        const jobId = jobIdArg.value;
+        const tempId = tempIdArg.value;
         try {
+            const [jobBeforeResponse, tempResponse] = await Promise.all([
+                api.get(`/jobs/${jobId}`),
+                api.get(`/temps/${tempId}`),
+            ]);
             const response = await api.patch(`/jobs/${jobId}`, {
                 tempId,
             });
-            const job = response.data;
-            return asTextResult(`Assigned ${job.temp
-                ? `${getTempDisplayName(job.temp)} (Temp ${job.temp.id})`
-                : `Temp ${tempId}`} to job ${job.id} (${getJobDisplayName(job)}).`);
+            const assignedJob = response.data;
+            return asTextResult(formatAssignmentSummary({
+                ...jobBeforeResponse.data,
+                temp: assignedJob.temp,
+            }, tempResponse.data));
         }
         catch (error) {
             return toErrorResult(error);
         }
     }
     if (name === "unassign_temp_from_job") {
-        const jobId = args?.jobId;
-        if (typeof jobId !== "number") {
-            return {
-                status: 400,
-                body: {
-                    error: "jobId must be a number.",
-                },
-            };
+        const jobIdArg = readNumberArg(args, "jobId");
+        if (!jobIdArg.ok) {
+            return jobIdArg.result;
         }
+        const jobId = jobIdArg.value;
         try {
+            const jobBeforeResponse = await api.get(`/jobs/${jobId}`);
             const response = await api.patch(`/jobs/${jobId}`, {
                 tempId: 0,
             });
-            const job = response.data;
-            return asTextResult(`Removed the assigned temp from job ${job.id} (${getJobDisplayName(job)}).`);
+            return asTextResult(formatUnassignmentSummary(response.data, jobBeforeResponse.data.temp));
         }
         catch (error) {
             return toErrorResult(error);
