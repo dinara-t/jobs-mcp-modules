@@ -6,167 +6,29 @@ import {
 import type {
   AssistantAction,
   ChatResult,
-  ClarificationPrompt,
-  PendingAction,
   RequestContext,
-  ResolvedEntities,
 } from "./types.js";
-
-function textReply(text: string): ChatResult {
-  return {
-    status: 200,
-    body: {
-      reply: text,
-      suggestedActions: [],
-      clarificationPrompts: [],
-    },
-  };
-}
-
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractJobId(message: string): number | null {
-  const match = message.match(/\bjob\s+(\d+)\b/i);
-  return match ? Number(match[1]) : null;
-}
-
-function extractTempId(message: string): number | null {
-  const match = message.match(/\btemp\s+(\d+)\b/i);
-  return match ? Number(match[1]) : null;
-}
-
-function isAssignIntent(normalized: string): boolean {
-  return (
-    normalized.includes("assign") ||
-    normalized.includes("put them on") ||
-    normalized.includes("put temp") ||
-    normalized.includes("book them")
-  );
-}
-
-function isUnassignIntent(normalized: string): boolean {
-  return (
-    normalized.includes("unassign") ||
-    normalized.includes("remove them") ||
-    normalized.includes("remove temp") ||
-    normalized.includes("clear assignment") ||
-    normalized.includes("take them off")
-  );
-}
-
-function isJobDetailsIntent(normalized: string): boolean {
-  return (
-    normalized.includes("show details for this job") ||
-    normalized.includes("show job details") ||
-    normalized.includes("job details") ||
-    normalized.includes("show details for job")
-  );
-}
-
-function isTempDetailsIntent(normalized: string): boolean {
-  return (
-    normalized.includes("show temp") && normalized.includes("details")
-  );
-}
-
-function isAvailableTempsIntent(normalized: string): boolean {
-  return (
-    normalized.includes("show available temps") ||
-    normalized.includes("available temps") ||
-    normalized.includes("who is available")
-  );
-}
-
-function isBestTempIntent(normalized: string): boolean {
-  return (
-    normalized.includes("suggest the best temp") ||
-    normalized.includes("best temp") ||
-    normalized.includes("who should take this")
-  );
-}
-
-function isAvailabilityExplanationIntent(normalized: string): boolean {
-  return (
-    normalized.includes("why is temp") ||
-    normalized.includes("why are they unavailable") ||
-    normalized.includes("can they take this job") ||
-    normalized.includes("why unavailable")
-  );
-}
-
-function buildResolvedEntities(
-  jobId: number | null,
-  tempId: number | null,
-  options?: {
-    usedCurrentJobContext?: boolean;
-    usedLastSuggestedTempContext?: boolean;
-  },
-): ResolvedEntities {
-  return {
-    jobId,
-    tempId,
-    usedCurrentJobContext: options?.usedCurrentJobContext ?? false,
-    usedLastSuggestedTempContext: options?.usedLastSuggestedTempContext ?? false,
-  };
-}
-
-function buildClarificationPromptsForTemps(
-  matches: Array<{ id: number; firstName: string; lastName: string }>,
-): ClarificationPrompt[] {
-  return matches.map((temp) => ({
-    id: `temp-${temp.id}`,
-    label: `${temp.firstName} ${temp.lastName} (Temp ${temp.id})`,
-    message: `Show temp ${temp.id} details`,
-  }));
-}
-
-function buildClarificationPromptsForJobs(
-  matches: Array<{ id: number; name?: string; title?: string }>,
-): ClarificationPrompt[] {
-  return matches.map((job) => ({
-    id: `job-${job.id}`,
-    label: `${job.name ?? job.title ?? `Job ${job.id}`} (Job ${job.id})`,
-    message: `Show job ${job.id} details`,
-  }));
-}
-
-function buildAssignPendingAction(jobId: number, tempId: number): PendingAction {
-  return {
-    type: "assign_temp_to_job",
-    jobId,
-    tempId,
-    title: "Assign temp",
-    message: `Assign temp ${tempId} to job ${jobId}?`,
-    confirmLabel: "Confirm assign",
-  };
-}
-
-function buildUnassignPendingAction(jobId: number): PendingAction {
-  return {
-    type: "unassign_temp_from_job",
-    jobId,
-    title: "Unassign temp",
-    message: `Remove the current temp from job ${jobId}?`,
-    confirmLabel: "Confirm unassign",
-  };
-}
-
-function extractReplyTextFromToolResult(result: Awaited<ReturnType<typeof handleToolCall>>): string {
-  if (result.body.content?.length) {
-    const firstText = result.body.content.find((item) => item.type === "text");
-    if (firstText?.text) {
-      return firstText.text;
-    }
-  }
-
-  return result.body.error ?? "No reply returned.";
-}
+import {
+  buildAssignPendingAction,
+  buildClarificationPromptsForJobs,
+  buildClarificationPromptsForTemps,
+  buildResolvedEntities,
+  buildUnassignPendingAction,
+  extractReplyTextFromToolResult,
+  textReply,
+} from "./chatActions.js";
+import {
+  extractJobId,
+  extractTempId,
+  isAssignIntent,
+  isAvailabilityExplanationIntent,
+  isAvailableTempsIntent,
+  isBestTempIntent,
+  isJobDetailsIntent,
+  isTempDetailsIntent,
+  isUnassignIntent,
+  normalizeText,
+} from "./chatText.js";
 
 export async function handleChatMessage(
   message: string,
@@ -178,7 +40,10 @@ export async function handleChatMessage(
   const currentJobId = context?.chatContext?.currentJobId ?? null;
   const lastSuggestedTempId = context?.chatContext?.lastSuggestedTempId ?? null;
 
-  const confirmAssignMatch = rawMessage.match(/^__confirm_assign__\s+temp\s+(\d+)\s+to\s+job\s+(\d+)$/i);
+  const confirmAssignMatch = rawMessage.match(
+    /^__confirm_assign__\s+temp\s+(\d+)\s+to\s+job\s+(\d+)$/i,
+  );
+
   if (confirmAssignMatch) {
     const tempId = Number(confirmAssignMatch[1]);
     const jobId = Number(confirmAssignMatch[2]);
@@ -218,6 +83,7 @@ export async function handleChatMessage(
   }
 
   const confirmUnassignMatch = rawMessage.match(/^__confirm_unassign__\s+job\s+(\d+)$/i);
+
   if (confirmUnassignMatch) {
     const jobId = Number(confirmUnassignMatch[1]);
 
@@ -320,7 +186,7 @@ export async function handleChatMessage(
       return {
         status: 200,
         body: {
-          reply: "I found more than one matching job name. Choose the job you meant.",
+          reply: "I found more than one matching job name. Choose the one you meant.",
           suggestedActions: [],
           clarificationPrompts: buildClarificationPromptsForJobs(jobResolution.matches),
           resolvedEntities: buildResolvedEntities(null, resolvedTempId, {
@@ -531,6 +397,7 @@ export async function handleChatMessage(
     const suggestedTempId = suggestedTempMatch ? Number(suggestedTempMatch[1]) : null;
 
     const suggestedActions: AssistantAction[] = [];
+
     if (result.status === 200 && suggestedTempId != null) {
       suggestedActions.push(
         {
@@ -538,10 +405,15 @@ export async function handleChatMessage(
           label: "Assign them",
           message: "Assign them",
         },
+    {
+  type: "send_message",
+  label: "Why are they available?",
+  message: "Can they take this job?",
+},
         {
           type: "send_message",
-          label: "Why are they available?",
-          message: `Why is temp ${suggestedTempId} unavailable for this job?`,
+          label: "Show all available temps",
+          message: "Show available temps for this job",
         },
       );
     }
@@ -552,10 +424,10 @@ export async function handleChatMessage(
         reply,
         suggestedActions,
         clarificationPrompts: [],
-        resolvedEntities: buildResolvedEntities(resolvedJobId, suggestedTempId, {
-          usedCurrentJobContext,
-          usedLastSuggestedTempContext,
-        }),
+     resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
+  usedCurrentJobContext,
+  usedLastSuggestedTempContext,
+}),
       },
     };
   }
@@ -582,6 +454,33 @@ export async function handleChatMessage(
               ]
             : [],
         clarificationPrompts: [],
+        resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
+      },
+    };
+  }
+
+  if (isAvailabilityExplanationIntent(normalized)) {
+    return {
+      status: 200,
+      body: {
+        reply:
+          "I need both a temp and a job to explain availability. Ask after a temp suggestion, or include both IDs.",
+        suggestedActions: [],
+        clarificationPrompts: [
+          {
+            id: "why-temp-5",
+            label: "Why is temp 5 unavailable for this job?",
+            message: "Why is temp 5 unavailable for this job?",
+          },
+          {
+            id: "can-they-take",
+            label: "Can they take this job?",
+            message: "Can they take this job?",
+          },
+        ],
         resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
           usedCurrentJobContext,
           usedLastSuggestedTempContext,
