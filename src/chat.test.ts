@@ -82,7 +82,7 @@ describe("handleChatMessage", () => {
     ]);
     expect(result.body.resolvedEntities).toEqual({
       jobId: 12,
-      tempId: null,
+      tempId: 5,
       usedCurrentJobContext: true,
       usedLastSuggestedTempContext: false,
     });

@@ -405,11 +405,11 @@ export async function handleChatMessage(
           label: "Assign them",
           message: "Assign them",
         },
-    {
-  type: "send_message",
-  label: "Why are they available?",
-  message: "Can they take this job?",
-},
+        {
+          type: "send_message",
+          label: "Why are they available?",
+          message: "Can they take this job?",
+        },
         {
           type: "send_message",
           label: "Show all available temps",
@@ -424,10 +424,10 @@ export async function handleChatMessage(
         reply,
         suggestedActions,
         clarificationPrompts: [],
-     resolvedEntities: buildResolvedEntities(resolvedJobId, null, {
-  usedCurrentJobContext,
-  usedLastSuggestedTempContext,
-}),
+        resolvedEntities: buildResolvedEntities(resolvedJobId, suggestedTempId, {
+          usedCurrentJobContext,
+          usedLastSuggestedTempContext,
+        }),
       },
     };
   }
@@ -439,20 +439,25 @@ export async function handleChatMessage(
       context,
     );
 
+    const reply = extractReplyTextFromToolResult(result);
+    const canAssign =
+      result.status === 200 &&
+      /\bcan take\b/i.test(reply) &&
+      !/\bcannot take\b/i.test(reply);
+
     return {
       status: result.status,
       body: {
-        reply: extractReplyTextFromToolResult(result),
-        suggestedActions:
-          result.status === 200
-            ? [
-                {
-                  type: "send_message",
-                  label: "Assign them",
-                  message: "Assign them",
-                },
-              ]
-            : [],
+        reply,
+        suggestedActions: canAssign
+          ? [
+              {
+                type: "send_message",
+                label: "Assign them",
+                message: "Assign them",
+              },
+            ]
+          : [],
         clarificationPrompts: [],
         resolvedEntities: buildResolvedEntities(resolvedJobId, resolvedTempId, {
           usedCurrentJobContext,
