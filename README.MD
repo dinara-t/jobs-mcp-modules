@@ -1,180 +1,124 @@
-# Jobs MCP Server
+# Jobs MCP Assistant Server
 
-Express + TypeScript server that powers the Jobs Application assistant. It exposes tool endpoints and a chat endpoint, then calls the Jobs API using the logged-in user's cookies and CSRF token.
+An AI integration layer that enables natural language interaction with the Jobs Workforce Management System.
 
-## Tech stack
+The MCP server acts as a bridge between users and the workforce management platform, allowing workforce operations to be performed using conversational requests.
 
-- Node.js
+---
+
+## Project Overview
+
+This project explores how AI assistants can be integrated into traditional business applications.
+
+Rather than requiring users to navigate multiple screens, the MCP server enables interactions such as:
+
+- "Show available workers next week"
+- "Assign John to Job 42"
+- "Why can't this worker be assigned?"
+- "Show details for today's jobs"
+
+The server translates natural language requests into structured API operations.
+
+---
+
+## Key Features
+
+### Conversational Workflows
+
+- Job lookup
+- Worker lookup
+- Availability checking
+- Assignment validation
+- Workforce information retrieval
+
+### AI Integration
+
+- MCP architecture
+- Tool discovery
+- Tool execution
+- Context-aware interactions
+
+### Backend Integration
+
+- Secure API communication
+- Workforce API integration
+- Error handling
+- Request orchestration
+
+---
+
+## Technology Stack
+
 - TypeScript
-- Express 5
+- Node.js
+- Express
 - Axios
-- CORS
-- dotenv
 - Vitest
-- tsx for local development
 
-## Main responsibilities
+The project uses a lightweight architecture focused on experimentation and rapid iteration. :contentReference[oaicite:0]{index=0}
 
-- Expose assistant tools through `/tools/list` and `/tools/call`.
-- Expose chat interaction through `/chat`.
-- Forward browser cookies to the Jobs API.
-- Forward CSRF headers to the Jobs API.
-- Resolve job and temp names from visible API results.
-- Return clarification prompts when a name match is ambiguous.
-- Return structured pending actions for assignment and unassignment.
-- Keep business rules inside the API while the MCP server handles assistant interpretation and tool orchestration.
+---
 
-## Prerequisites
-
-- Node.js 18 or newer
-- Jobs API running on `http://localhost:8080`
-- Jobs UI running on `http://localhost:5173`
-
-## Environment variables
-
-Create a `.env` file in the MCP project root:
-
-```properties
-PORT=3000
-JOBS_API_BASE_URL=http://localhost:8080
-JOBS_UI_ORIGIN=http://localhost:5173
-```
-
-## Install and run
-
-From the MCP server project folder:
-
-```bash
-npm install
-npm run dev
-```
-
-The MCP server runs on:
+## Architecture
 
 ```text
-http://localhost:3000
+User
+  │
+  ▼
+MCP Assistant
+  │
+  ▼
+Jobs API
+  │
+  ▼
+Aurora Database
 ```
 
-## Scripts
+---
 
-```bash
-npm run dev
-npm run build
-npm start
-npm test
-npm run test:watch
-```
+## Cloud Deployment
 
-## HTTP endpoints
+Deployed alongside the Jobs platform using AWS infrastructure.
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | Returns server status and configured API/UI origins |
-| `POST` | `/tools/list` | Returns the available assistant tools |
-| `POST` | `/tools/call` | Calls one assistant tool directly |
-| `POST` | `/chat` | Handles a natural-language assistant message |
+The deployment experience included:
 
-## Available tools
+- Application hosting
+- HTTPS configuration
+- DNS management
+- Secure API communication
 
-| Tool | Purpose |
-|---|---|
-| `get_job_details` | Returns job details for a job ID |
-| `get_temp_details` | Returns temp details and assigned jobs for a temp ID |
-| `get_available_temps_for_job` | Lists temps available for a job |
-| `suggest_best_temp_for_job` | Suggests the lowest-workload available temp |
-| `explain_temp_availability_for_job` | Explains whether a temp can take a job |
-| `assign_temp_to_job` | Assigns a temp to a job |
-| `unassign_temp_from_job` | Removes the assigned temp from a job |
+---
 
-## Chat endpoint
+## What I Learned
 
-```http
-POST /chat
-```
+This project allowed me to explore modern AI integration patterns.
 
-Request body:
+Key learning outcomes:
 
-```json
-{
-  "message": "suggest the best temp for this job",
-  "context": {
-    "currentJobId": 12,
-    "lastSuggestedTempId": null
-  }
-}
-```
+- MCP concepts and architecture
+- Tool-based AI workflows
+- API orchestration
+- Prompt design
+- Context management
+- TypeScript backend development
+- AI-assisted user experiences
 
-Successful response shape:
+It also demonstrated how traditional enterprise systems can be enhanced with conversational interfaces without replacing existing business logic.
 
-```json
-{
-  "reply": "Best available temp for job #12 is Alex Taylor, temp #5.",
-  "suggestedActions": [],
-  "clarificationPrompts": [],
-  "pendingAction": null,
-  "resolvedEntities": {
-    "jobId": 12,
-    "tempId": 5,
-    "usedCurrentJobContext": true,
-    "usedLastSuggestedTempContext": false
-  }
-}
-```
+---
 
-## Tool call endpoint
+## Why This Project Matters
 
-```http
-POST /tools/call
-```
+Many business systems still rely on complex interfaces and manual workflows.
 
-Request body:
+This project explores how AI can improve productivity by providing a conversational layer over existing applications while keeping business rules, security, and data ownership within the core platform.
 
-```json
-{
-  "name": "assign_temp_to_job",
-  "arguments": {
-    "jobId": 12,
-    "tempId": 5
-  }
-}
-```
+---
 
-## Auth and CSRF forwarding
+## Future Improvements
 
-The MCP server does not create its own login session. It relies on the UI browser session.
-
-For protected Jobs API calls, the MCP server forwards:
-
-- The incoming `Cookie` header.
-- The incoming `X-XSRF-TOKEN` or `X-CSRF-TOKEN` header.
-- If no explicit CSRF header is supplied, it attempts to read `XSRF-TOKEN` from the cookie header and send it as `X-XSRF-TOKEN`.
-
-This keeps API security consistent while still allowing the assistant to perform protected actions.
-
-## Testing
-
-Run:
-
-```bash
-npm test
-```
-
-The tests cover assistant interpretation, context usage, ambiguity handling, pending action confirmation, and tool delegation.
-
-## Troubleshooting
-
-### MCP health check works but chat fails
-
-Check that `JOBS_API_BASE_URL` is correct and that the API is running.
-
-### Tool actions return 401
-
-Log in through the UI first. The MCP server needs the browser's JWT cookie.
-
-### Tool actions return 403
-
-Check that the UI forwards the CSRF header to MCP and that MCP forwards it to the API.
-
-### Assistant chooses the wrong entity
-
-Use explicit job IDs or temp IDs in the message. The assistant can resolve visible names, but similar names may produce clarification prompts.
+- Multi-step AI workflows
+- Intelligent workforce recommendations
+- Scheduling optimisation
+- Context memory
+- AI-generated workforce reports
