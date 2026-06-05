@@ -123,7 +123,17 @@ export function createApiClient(context?: RequestContext) {
 }
 
 export function toErrorResult(error: unknown): ToolCallResult {
+ 
+
+
   if (axios.isAxiosError(error)) {
+    console.error("API request failed", {
+  status: error.response?.status,
+  url: error.config?.url,
+  method: error.config?.method,
+  response: error.response?.data,
+  requestHeaders: error.config?.headers,
+});
     const status = error.response?.status ?? 500;
     const responseData = error.response?.data;
 
