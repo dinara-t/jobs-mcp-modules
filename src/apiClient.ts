@@ -73,22 +73,43 @@ function getCookieValue(cookieHeader: string | undefined, name: string): string 
     const [key, ...rest] = cookie.trim().split("=");
 
     if (key === name) {
-      return decodeURIComponent(rest.join("="));
+      return rest.join("=");
     }
   }
 
   return null;
 }
 
+function buildForwardedCookieHeader(context?: RequestContext): string | undefined {
+  const originalCookieHeader = context?.cookieHeader?.trim();
+
+  if (!originalCookieHeader) {
+    if (context?.csrfHeaderValue) {
+      return `XSRF-TOKEN=${context.csrfHeaderValue}`;
+    }
+
+    return undefined;
+  }
+
+  const existingXsrfCookie = getCookieValue(originalCookieHeader, "XSRF-TOKEN");
+
+  if (existingXsrfCookie || !context?.csrfHeaderValue) {
+    return originalCookieHeader;
+  }
+
+  return `${originalCookieHeader}; XSRF-TOKEN=${context.csrfHeaderValue}`;
+}
+
 export function createApiClient(context?: RequestContext) {
   const headers: Record<string, string> = {};
+  const cookieHeader = buildForwardedCookieHeader(context);
 
-  if (context?.cookieHeader) {
-    headers.Cookie = context.cookieHeader;
+  if (cookieHeader) {
+    headers.Cookie = cookieHeader;
   }
 
   const csrfHeaderValue =
-    context?.csrfHeaderValue ?? getCookieValue(context?.cookieHeader, "XSRF-TOKEN");
+    context?.csrfHeaderValue ?? getCookieValue(cookieHeader, "XSRF-TOKEN");
 
   if (csrfHeaderValue) {
     headers["X-XSRF-TOKEN"] = csrfHeaderValue;
@@ -96,25 +117,58 @@ export function createApiClient(context?: RequestContext) {
 
   return axios.create({
     baseURL: config.jobsApiBaseUrl,
-    withCredentials: true,
     headers,
+    withCredentials: true,
   });
 }
 
 export function toErrorResult(error: unknown): ToolCallResult {
   if (axios.isAxiosError(error)) {
-    const responseData = error.response?.data as
-      | { message?: string; error?: string }
-      | undefined;
+    const status = error.response?.status ?? 500;
+    const responseData = error.response?.data;
+
+    if (typeof responseData === "string") {
+      return {
+        status,
+        body: {
+          error: responseData,
+        },
+      };
+    }
+
+    if (responseData && typeof responseData === "object") {
+      const body = responseData as {
+        message?: string;
+        error?: string;
+        reply?: string;
+      };
+
+      return {
+        status,
+        body: {
+          error:
+            body.message ??
+            body.error ??
+            body.reply ??
+            error.message ??
+            `Request failed with status ${status}`,
+        },
+      };
+    }
 
     return {
-      status: error.response?.status ?? 500,
+      status,
       body: {
-        error:
-          responseData?.message ||
-          responseData?.error ||
-          error.message ||
-          "Jobs API request failed.",
+        error: error.message ?? `Request failed with status ${status}`,
+      },
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      status: 500,
+      body: {
+        error: error.message,
       },
     };
   }
@@ -122,7 +176,7 @@ export function toErrorResult(error: unknown): ToolCallResult {
   return {
     status: 500,
     body: {
-      error: "Unknown error calling Jobs API.",
+      error: "Unknown error",
     },
   };
 }
